@@ -102,11 +102,11 @@ jobs:
         with:
           node-version: 20
 
-      - name: "☕ Setup Java 17 (for Gradle)"
+      - name: "☕ Setup Java 21 (for Gradle)"
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 17
+          java-version: 21
 
       - name: "🖼️ Install ImageMagick (for icon processing)"
         run: |
@@ -505,7 +505,7 @@ jobs:
 
           echo "✅ Icon processing complete"
 
-      # ═══════════════════���════════════════════════════
+      # ═══════════════════════════════════════════════
       # 第 6 步：注入安卓权限
       # ════════════════════════════════════════════════
       - name: "🔐 Configure Android permissions"

@@ -1,0 +1,819 @@
+# ============================================================================
+# TaprootAgro Android Builder — 一键打包工作流
+# ============================================================================
+#
+# 使用方法：
+#   1. 创建一个新的 GitHub 仓库（或 Fork 包含此文件的仓库）
+#   2. 把这个文件放到 .github/workflows/build-android.yml
+#   3. Actions → Run workflow → 填写 3 个字段 → 点击运行
+#   4. 约 8-12 分钟后下载 APK
+#
+# 输入说明：
+#   app_name  → App 显示名称（如 "丰收助手"）
+#   app_id    → 安卓包名（如 com.harvest.helper）
+#   pwa_repo  → 你的 PWA 源码仓库地址（如 https://github.com/yourname/your-pwa）
+#
+# 此工作流会：
+#   ✅ 拉取你的 PWA 源码并构建
+#   ✅ 用 Capacitor 包装成安卓应用（本地模式，代码打包进 APK）
+#   ✅ 自动处理 512px 图标 → 安卓全尺寸适配 + 自适应图标
+#   ✅ 注入全套安卓权限（网络/相机/定位/存储/推送/后台/生物识别）
+#   ✅ 自动生成签名 Keystore（首次）或使用已有 Keystore（后续）
+#   ✅ 输出 APK + AAB + Keystore + 签名信息
+#
+# ============================================================================
+
+name: "📱 Build Android App"
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_name:
+        description: "App display name (e.g. GreenFarm / 丰收助手)"
+        required: true
+        type: string
+      app_id:
+        description: "Android package ID (e.g. com.greenfarm.app)"
+        required: true
+        type: string
+      pwa_repo:
+        description: "Your PWA source repo URL (e.g. https://github.com/user/repo)"
+        required: true
+        type: string
+      app_version:
+        description: "Version number (default: 1.0.0)"
+        required: false
+        default: "1.0.0"
+        type: string
+      icon_bg_color:
+        description: "Adaptive icon background color (default: #FFFFFF)"
+        required: false
+        default: "#FFFFFF"
+        type: string
+
+# ============================================================================
+# 如果客户的 PWA 仓库是私有的，需要在本仓库 Settings → Secrets 添加：
+#   PWA_REPO_PAT → 客户的 GitHub Personal Access Token（有 repo 读取权限）
+#
+# 如果是公开仓库，不需要任何 Secret，直接跑。
+#
+# 关于 Keystore（签名密钥）：
+#   首次构建：自动生成，输出在 Artifact 里
+#   后续构建：把首次的 Keystore 存为 Secret 以保持签名一致
+#     KEYSTORE_BASE64  → base64 编码的 keystore 文件
+#     KEYSTORE_PASS    → keystore 密码
+#   如果不存这些 Secret，每次都会生成新的（APK 签名不同，无法覆盖安装）
+# ============================================================================
+
+jobs:
+  build:
+    name: "🚀 Build & Sign"
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      # ════════════════════════════════════════════════
+      # 第 1 步：拉取客户的 PWA 源码
+      # ════════════════════════════════════════════════
+      - name: "📥 Clone PWA source code"
+        run: |
+          echo "📥 Cloning PWA from: ${{ inputs.pwa_repo }}"
+
+          # 判断是否有私有仓库的 PAT
+          if [ -n "${{ secrets.PWA_REPO_PAT }}" ]; then
+            # 私有仓库：用 PAT 认证
+            REPO_URL="${{ inputs.pwa_repo }}"
+            # 把 https://github.com/... 转成 https://<PAT>@github.com/...
+            AUTH_URL=$(echo "$REPO_URL" | sed "s|https://|https://${{ secrets.PWA_REPO_PAT }}@|")
+            git clone --depth 1 "$AUTH_URL" pwa-source
+          else
+            # 公开仓库：直接 clone
+            git clone --depth 1 "${{ inputs.pwa_repo }}" pwa-source
+          fi
+
+          echo "✅ Source code cloned successfully"
+          ls -la pwa-source/
+
+      # ════════════════════════════════════════════════
+      # 第 2 步：环境准备
+      # ════════════════════════════════════════════════
+      - name: "📦 Setup Node.js 20"
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: "☕ Setup Java 17 (for Gradle)"
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: "🖼️ Install ImageMagick (for icon processing)"
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq imagemagick librsvg2-bin
+
+      # ════════════════════════════════════════════════
+      # 第 3 步：安装依赖 + 构建 PWA
+      # ════════════════════════════════════════════════
+      - name: "📦 Install PWA dependencies"
+        working-directory: pwa-source
+        run: |
+          # 自动检测包管理器
+          if [ -f "pnpm-lock.yaml" ]; then
+            echo "📦 Detected pnpm-lock.yaml → using pnpm"
+            npm install -g pnpm
+            pnpm install --frozen-lockfile
+          elif [ -f "yarn.lock" ]; then
+            echo "📦 Detected yarn.lock → using yarn"
+            npm install -g yarn
+            yarn install --frozen-lockfile
+          elif [ -f "package-lock.json" ]; then
+            echo "📦 Detected package-lock.json → using npm ci"
+            npm ci
+          else
+            echo "⚠️ No lockfile found — falling back to npm install"
+            echo "   Tip: commit your pnpm-lock.yaml or package-lock.json for reproducible builds"
+            npm install
+          fi
+
+      # ════════════════════════════════════════════════
+      # 第 3.5 步：安装 Capacitor 插件（构建前安装，供 loader 静态引用）
+      # ════════════════════════════════════════════════
+      - name: "⚡ Install Capacitor plugins"
+        working-directory: pwa-source
+        run: |
+          # ═══ Capacitor 核心 ═══
+          npm install @capacitor/core @capacitor/cli @capacitor/android
+
+          # ═══ 第一档：必装插件（核心功能） ═══
+          npm install @capacitor/camera \
+                      @capacitor/geolocation \
+                      @capacitor/push-notifications \
+                      @capacitor/filesystem \
+                      @capacitor/network \
+                      @capacitor/device \
+                      @capacitor/preferences \
+                      @capacitor/app
+
+          # ═══ 第二档：推荐插件（体验提升） ═══
+          npm install @capacitor/keyboard \
+                      @capacitor/status-bar \
+                      @capacitor/splash-screen \
+                      @capacitor/haptics \
+                      @capacitor/local-notifications \
+                      @capacitor/share \
+                      @capacitor/clipboard \
+                      @capacitor/dialog \
+                      @capacitor/toast
+
+          # ═══ 第三档：可选插件（增强功能） ═══
+          # 社区插件可能尚未适配最新 Capacitor 版本，用 --legacy-peer-deps 跳过 peer 检查
+          npm install --legacy-peer-deps \
+                      @capacitor/screen-orientation \
+                      @capacitor/browser \
+                      @capacitor/action-sheet \
+                      @capacitor-community/barcode-scanner \
+                      @capacitor-community/speech-recognition \
+                      @capacitor-community/text-to-speech \
+                      @capacitor-community/native-audio \
+                      @capacitor-community/keep-awake \
+                      @capacitor-community/file-opener \
+                      @capacitor-community/contacts
+
+          echo "✅ All 27 Capacitor plugins installed"
+
+      # ════════════════════════════════════════════════
+      # 第 3.6 步：生成 Capacitor Loader（桥接 bridge ↔ 原生插件）
+      # ════════════════════════════════════════════════
+      - name: "🔌 Generate Capacitor plugin loader"
+        working-directory: pwa-source
+        run: |
+          # 生成 capacitor-loader.ts
+          # 该文件用 static import 导入所有插件，注册到 window.__CAP_PLUGINS__
+          # capacitor-bridge.ts 中的 loadPlugin() 从该全局对象读取插件
+          # PWA 构建时此文件不存在 → loadPlugin() 返回 null → 走 Web 降级
+          cat > src/capacitor-loader.ts << 'LOADEREOF'
+          /**
+           * Auto-generated by build-android.yml
+           * DO NOT EDIT — this file is created during the Android build process
+           *
+           * Imports all Capacitor plugins and registers them on window.__CAP_PLUGINS__
+           * so that capacitor-bridge.ts can access them without dynamic imports.
+           */
+
+          // ═══ 第一档：核心 ═══
+          import * as CapCamera from '@capacitor/camera';
+          import * as CapGeolocation from '@capacitor/geolocation';
+          import * as CapPushNotifications from '@capacitor/push-notifications';
+          import * as CapFilesystem from '@capacitor/filesystem';
+          import * as CapNetwork from '@capacitor/network';
+          import * as CapDevice from '@capacitor/device';
+          import * as CapPreferences from '@capacitor/preferences';
+          import * as CapApp from '@capacitor/app';
+
+          // ═══ 第二档：体验 ═══
+          import * as CapKeyboard from '@capacitor/keyboard';
+          import * as CapStatusBar from '@capacitor/status-bar';
+          import * as CapSplashScreen from '@capacitor/splash-screen';
+          import * as CapHaptics from '@capacitor/haptics';
+          import * as CapLocalNotifications from '@capacitor/local-notifications';
+          import * as CapShare from '@capacitor/share';
+          import * as CapClipboard from '@capacitor/clipboard';
+          import * as CapDialog from '@capacitor/dialog';
+          import * as CapToast from '@capacitor/toast';
+
+          // ═══ 第三档：增强 ═══
+          import * as CapScreenOrientation from '@capacitor/screen-orientation';
+          import * as CapBrowser from '@capacitor/browser';
+          import * as CapActionSheet from '@capacitor/action-sheet';
+          import * as CapBarcodeScanner from '@capacitor-community/barcode-scanner';
+          import * as CapSpeechRecognition from '@capacitor-community/speech-recognition';
+          import * as CapTextToSpeech from '@capacitor-community/text-to-speech';
+          import * as CapNativeAudio from '@capacitor-community/native-audio';
+          import * as CapKeepAwake from '@capacitor-community/keep-awake';
+          import * as CapFileOpener from '@capacitor-community/file-opener';
+          import * as CapContacts from '@capacitor-community/contacts';
+
+          (window as any).__CAP_PLUGINS__ = {
+            '@capacitor/camera': CapCamera,
+            '@capacitor/geolocation': CapGeolocation,
+            '@capacitor/push-notifications': CapPushNotifications,
+            '@capacitor/filesystem': CapFilesystem,
+            '@capacitor/network': CapNetwork,
+            '@capacitor/device': CapDevice,
+            '@capacitor/preferences': CapPreferences,
+            '@capacitor/app': CapApp,
+            '@capacitor/keyboard': CapKeyboard,
+            '@capacitor/status-bar': CapStatusBar,
+            '@capacitor/splash-screen': CapSplashScreen,
+            '@capacitor/haptics': CapHaptics,
+            '@capacitor/local-notifications': CapLocalNotifications,
+            '@capacitor/share': CapShare,
+            '@capacitor/clipboard': CapClipboard,
+            '@capacitor/dialog': CapDialog,
+            '@capacitor/toast': CapToast,
+            '@capacitor/screen-orientation': CapScreenOrientation,
+            '@capacitor/browser': CapBrowser,
+            '@capacitor/action-sheet': CapActionSheet,
+            '@capacitor-community/barcode-scanner': CapBarcodeScanner,
+            '@capacitor-community/speech-recognition': CapSpeechRecognition,
+            '@capacitor-community/text-to-speech': CapTextToSpeech,
+            '@capacitor-community/native-audio': CapNativeAudio,
+            '@capacitor-community/keep-awake': CapKeepAwake,
+            '@capacitor-community/file-opener': CapFileOpener,
+            '@capacitor-community/contacts': CapContacts,
+          };
+
+          console.log('[TaprootAgro] Capacitor plugin loader initialized — 27 plugins registered');
+          LOADEREOF
+
+          # 在 main.tsx 最顶部注入 import（确保在 App 渲染前加载）
+          sed -i '1i import "./capacitor-loader";' src/main.tsx
+
+          echo "✅ Capacitor loader generated and injected into main.tsx"
+
+      - name: "🔨 Build PWA"
+        working-directory: pwa-source
+        run: |
+          # 构建生成 dist/ 目录
+          npm run build
+
+          # 确认 dist/ 存在
+          if [ ! -d "dist" ]; then
+            echo "❌ Error: 'dist' directory not found after build."
+            echo "   Make sure your project's build script outputs to 'dist/'."
+            echo "   If it outputs elsewhere, create a symlink or adjust vite.config."
+            exit 1
+          fi
+
+          echo "✅ PWA built successfully (with Capacitor plugins bundled)"
+          echo "   dist/ size: $(du -sh dist | cut -f1)"
+
+      # ════════════════════════════════════════════════
+      # 第 4 步：初始化 Capacitor 安卓项目
+      # ════════════════════════════════════════════════
+      - name: "🤖 Initialize Capacitor (local build mode)"
+        working-directory: pwa-source
+        run: |
+          # 初始化 Capacitor
+          npx cap init "${{ inputs.app_name }}" "${{ inputs.app_id }}" --web-dir dist
+
+          # 覆盖配置文件（本地模式：Web 代码打包进 APK）
+          # 注意：heredoc 内容不能有前导缩进，否则会写入文件
+          cat > capacitor.config.ts << 'CAPEOF'
+import type { CapacitorConfig } from '@capacitor/cli';
+
+const config: CapacitorConfig = {
+  appId: '${{ inputs.app_id }}',
+  appName: '${{ inputs.app_name }}',
+  webDir: 'dist',
+  plugins: {
+    SplashScreen: {
+      launchAutoHide: true,
+      launchShowDuration: 2000,
+      backgroundColor: '#ffffff',
+      showSpinner: false,
+    },
+    PushNotifications: {
+      presentationOptions: ['badge', 'sound', 'alert'],
+    },
+    Keyboard: {
+      resize: 'body',
+      resizeOnFullScreen: true,
+    },
+    LocalNotifications: {
+      smallIcon: 'ic_launcher',
+      iconColor: '#4CAF50',
+    },
+  },
+};
+
+export default config;
+CAPEOF
+
+          # 添加安卓平台
+          npx cap add android
+          npx cap sync android
+
+          # ── 调试：显示原始文件内容 ──
+          echo "=== android/build.gradle (before patch) ==="
+          cat android/build.gradle
+          echo ""
+          echo "=== android/app/build.gradle first 15 lines (before patch) ==="
+          head -15 android/app/build.gradle
+          echo ""
+          echo "=== gradle-wrapper.properties (before patch) ==="
+          cat android/gradle/wrapper/gradle-wrapper.properties
+          echo ""
+
+          # ── 升级 AGP ──
+          # 处理两种格式：plugins DSL 和 buildscript/classpath
+          echo "   Patching AGP version → 8.9.1 ..."
+          # 格式1: id 'com.android.application' version '8.7.2'
+          sed -i "s|com\.android\.application' version '[^']*'|com.android.application' version '8.9.1'|" android/build.gradle
+          sed -i "s|com\.android\.library' version '[^']*'|com.android.library' version '8.9.1'|" android/build.gradle
+          # 格式2: classpath 'com.android.tools.build:gradle:8.7.2'
+          sed -i "s|com\.android\.tools\.build:gradle:[^'\"]*|com.android.tools.build:gradle:8.9.1|" android/build.gradle
+
+          # ── 升级 compileSdk ──
+          echo "   Patching compileSdk → 36 ..."
+          # 格式1: compileSdkVersion = 35 (在 ext 块里)
+          sed -i 's/compileSdkVersion = [0-9]*/compileSdkVersion = 36/' android/build.gradle
+          # 格式2: compileSdk 35 (直接数字)
+          sed -i 's/compileSdk [0-9][0-9]*/compileSdk 36/' android/app/build.gradle
+          # 格式3: compileSdkVersion rootProject.ext.compileSdkVersion → 替换为硬编码
+          sed -i 's/compileSdk rootProject\.ext\.compileSdkVersion/compileSdk 36/' android/app/build.gradle
+          sed -i 's/compileSdkVersion rootProject\.ext\.compileSdkVersion/compileSdkVersion 36/' android/app/build.gradle
+
+          # ── 升级 Gradle wrapper ──
+          echo "   Patching Gradle wrapper → 8.12 ..."
+          sed -i 's|distributionUrl=.*|distributionUrl=https\\://services.gradle.org/distributions/gradle-8.12-all.zip|' android/gradle/wrapper/gradle-wrapper.properties
+
+          # ── 调试：显示修改后的文件内容 ──
+          echo ""
+          echo "=== android/build.gradle (after patch) ==="
+          cat android/build.gradle
+          echo ""
+          echo "=== android/app/build.gradle first 15 lines (after patch) ==="
+          head -15 android/app/build.gradle
+          echo ""
+          echo "=== gradle-wrapper.properties (after patch) ==="
+          cat android/gradle/wrapper/gradle-wrapper.properties
+
+          echo ""
+          echo "✅ Capacitor Android project initialized (AGP 8.9.1 + compileSdk 36 + Gradle 8.12)"
+
+      # ════════════════════════════════════════════════
+      # 第 5 步：处理图标（512px → 安卓全尺寸 + 自适应图标）
+      # ════════════════════════════════════════════════
+      - name: "🎨 Process app icon (512 → all Android sizes)"
+        working-directory: pwa-source
+        run: |
+          ANDROID_RES="android/app/src/main/res"
+
+          # ── 查找 512 图标 ──
+          ICON_SRC=""
+          for candidate in \
+            "public/icon-512.png" \
+            "public/icon-512.svg" \
+            "public/icons/icon-512.png" \
+            "public/icons/icon-512x512.png" \
+            "public/favicon-512.png" \
+            "public/logo-512.png" \
+            "public/icon.png" \
+            "public/logo.png"; do
+            if [ -f "$candidate" ]; then
+              ICON_SRC="$candidate"
+              break
+            fi
+          done
+
+          if [ -z "$ICON_SRC" ]; then
+            echo "⚠️ No 512px icon found. Using default Capacitor icon."
+            echo "   Tip: Place a 512x512 PNG at public/icon-512.png"
+            exit 0
+          fi
+
+          echo "🎨 Found icon: $ICON_SRC"
+
+          # ── 如果是 SVG，先转成 PNG ──
+          ICON_PNG="/tmp/icon-512.png"
+          if [[ "$ICON_SRC" == *.svg ]]; then
+            echo "   Converting SVG → PNG..."
+            rsvg-convert -w 512 -h 512 "$ICON_SRC" -o "$ICON_PNG"
+          else
+            cp "$ICON_SRC" "$ICON_PNG"
+          fi
+
+          # ── 生成标准图标（ic_launcher.png） ──
+          echo "   Generating standard launcher icons..."
+          declare -A STD_SIZES=(
+            ["mdpi"]=48
+            ["hdpi"]=72
+            ["xhdpi"]=96
+            ["xxhdpi"]=144
+            ["xxxhdpi"]=192
+          )
+
+          for density in "${!STD_SIZES[@]}"; do
+            size=${STD_SIZES[$density]}
+            dir="$ANDROID_RES/mipmap-${density}"
+            mkdir -p "$dir"
+            convert "$ICON_PNG" -resize "${size}x${size}" "$dir/ic_launcher.png"
+            convert "$ICON_PNG" \
+              \( +clone -threshold -1 -negate -fill white -draw "roundrectangle 0,0,${size},${size},$((size/4)),$((size/4))" \) \
+              -compose CopyOpacity -composite \
+              "$dir/ic_launcher_round.png"
+            echo "     ✓ mipmap-${density}: ${size}×${size}"
+          done
+
+          # ── 生成自适应图标前景层（ic_launcher_foreground.png） ──
+          echo "   Generating adaptive icon foreground layers..."
+          declare -A FG_SIZES=(
+            ["mdpi"]=108
+            ["hdpi"]=162
+            ["xhdpi"]=216
+            ["xxhdpi"]=324
+            ["xxxhdpi"]=432
+          )
+
+          for density in "${!FG_SIZES[@]}"; do
+            canvas=${FG_SIZES[$density]}
+            # 安全区 = 画布的 66%，图标内容放在中间
+            safe_zone=$((canvas * 66 / 100))
+            dir="$ANDROID_RES/mipmap-${density}"
+            mkdir -p "$dir"
+            convert "$ICON_PNG" \
+              -resize "${safe_zone}x${safe_zone}" \
+              -gravity center \
+              -background none \
+              -extent "${canvas}x${canvas}" \
+              "$dir/ic_launcher_foreground.png"
+            echo "     ✓ foreground mipmap-${density}: ${canvas}×${canvas} (safe zone: ${safe_zone})"
+          done
+
+          # ── 生成自适应图标 XML 配置 ──
+          echo "   Creating adaptive icon XML configs..."
+
+          # 背景色
+          mkdir -p "$ANDROID_RES/values"
+          cat > "$ANDROID_RES/values/ic_launcher_background.xml" << XMLEOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <color name="ic_launcher_background">${{ inputs.icon_bg_color }}</color>
+          </resources>
+          XMLEOF
+
+          # 自适应图标定义（Android 8.0+, API 26+）
+          mkdir -p "$ANDROID_RES/mipmap-anydpi-v26"
+          cat > "$ANDROID_RES/mipmap-anydpi-v26/ic_launcher.xml" << 'XMLEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@color/ic_launcher_background"/>
+              <foreground android:drawable="@mipmap/ic_launcher_foreground"/>
+          </adaptive-icon>
+          XMLEOF
+
+          cat > "$ANDROID_RES/mipmap-anydpi-v26/ic_launcher_round.xml" << 'XMLEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@color/ic_launcher_background"/>
+              <foreground android:drawable="@mipmap/ic_launcher_foreground"/>
+          </adaptive-icon>
+          XMLEOF
+
+          echo "✅ Icon processing complete"
+
+      # ════════════════════════════════════════════════
+      # 第 6 步：注入安卓权限
+      # ════════════════════════════════════════════════
+      - name: "🔐 Configure Android permissions"
+        working-directory: pwa-source
+        run: |
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+
+          # 在 <manifest> 标签后（第一个 <uses-permission 之前）插入完整权限声明
+          # 使用 sed 在 </manifest> 之前插入
+          sed -i '/<\/manifest>/i \
+              \n\
+              <!-- ═══ 网络（必须） ═══ -->\n\
+              <uses-permission android:name="android.permission.INTERNET" />\n\
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />\n\
+              \n\
+              <!-- ═══ 相机（拍照识别病虫害、扫码） ═══ -->\n\
+              <uses-permission android:name="android.permission.CAMERA" />\n\
+              <uses-feature android:name="android.hardware.camera" android:required="false" />\n\
+              <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />\n\
+              \n\
+              <!-- ═══ 麦克风（语音消息、语音/视频通话） ═══ -->\n\
+              <uses-permission android:name="android.permission.RECORD_AUDIO" />\n\
+              <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />\n\
+              \n\
+              <!-- ═══ 定位（农田位置、天气查询） ═══ -->\n\
+              <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\n\
+              <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />\n\
+              \n\
+              <!-- ═══ 存储 Android 12 及以下 ═══ -->\n\
+              <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />\n\
+              <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="32" />\n\
+              \n\
+              <!-- ═══ 存储 Android 13+ ═══ -->\n\
+              <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />\n\
+              <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />\n\
+              \n\
+              <!-- ═══ 推送通知 ═══ -->\n\
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n\
+              <uses-permission android:name="android.permission.VIBRATE" />\n\
+              \n\
+              <!-- ═══ 后台保活（可选，不需要可删除这段） ═══ -->\n\
+              <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />\n\
+              <uses-permission android:name="android.permission.WAKE_LOCK" />\n\
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\n\
+              <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />\n\
+              \n\
+              <!-- ═══ 后台通话（语音/视频通话切后台时保持麦克风和摄像头） ═══ -->\n\
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />\n\
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />\n\
+              \n\
+              <!-- ═══ 蓝牙耳机（Android 12+，可选） ═══ -->\n\
+              <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />\n\
+              \n\
+              <!-- ═══ 生物识别（可选，不需要可删除这段） ═══ -->\n\
+              <uses-permission android:name="android.permission.USE_BIOMETRIC" />\n\
+              <uses-permission android:name="android.permission.USE_FINGERPRINT" />' \
+            "$MANIFEST"
+
+          # 强制 HTTPS
+          sed -i 's/<application/<application android:usesCleartextTraffic="false"/' "$MANIFEST"
+
+          echo "✅ Android permissions injected"
+
+      # ════════════════════════════════════════════════
+      # 第 7 步：签名密钥（Keystore）
+      # ════════════════════════════════════════════════
+      - name: "🔑 Setup signing keystore"
+        id: keystore
+        working-directory: pwa-source
+        run: |
+          KS_FILE="android/app/release.keystore"
+          KS_ALIAS="${{ inputs.app_id }}"
+
+          # ── 检查是否有已存储的 Keystore ──
+          if [ -n "${{ secrets.KEYSTORE_BASE64 }}" ] && [ -n "${{ secrets.KEYSTORE_PASS }}" ]; then
+            echo "🔑 Using existing keystore from Secrets"
+            echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > "$KS_FILE"
+            KS_PASS="${{ secrets.KEYSTORE_PASS }}"
+            IS_NEW="false"
+          else
+            # ── 检查是否为非首次构建但忘了存 Secret ──
+            # 通过检查仓库是否有之前的 artifact 来判断（简单方案：用 run_number）
+            if [ "${{ github.run_number }}" -gt 1 ]; then
+              echo ""
+              echo "╔══════════════════════════════════════════════════════════════════════╗"
+              echo "║  ⚠️  警告：这不是首次构建，但未检测到 Keystore Secret！              ║"
+              echo "║                                                                      ║"
+              echo "║  如果你之前已经构建过并分发了 APK，这次生成的新 Keystore              ║"
+              echo "║  签名不同，用户必须卸载旧版才能安装新版！                             ║"
+              echo "║                                                                      ║"
+              echo "║  如果这是你第一次成功构建，请忽略此警告。                             ║"
+              echo "║                                                                      ║"
+              echo "║  📖 如何保存 Keystore：                                              ║"
+              echo "║     下载上次构建的 keystore-info.txt，按说明添加 2 个 Secret：        ║"
+              echo "║     • KEYSTORE_BASE64                                                ║"
+              echo "║     • KEYSTORE_PASS                                                  ║"
+              echo "╚══════════════════════════════════════════════════════════════════════╝"
+              echo ""
+            fi
+
+            echo "🔑 Generating new keystore..."
+            KS_PASS=$(openssl rand -hex 16)
+            keytool -genkeypair -v \
+              -keystore "$KS_FILE" \
+              -alias "$KS_ALIAS" \
+              -keyalg RSA -keysize 2048 \
+              -validity 10000 \
+              -storepass "$KS_PASS" \
+              -keypass "$KS_PASS" \
+              -dname "CN=${{ inputs.app_name }}, OU=Mobile, O=${{ inputs.app_name }}, L=Unknown, ST=Unknown, C=US"
+            IS_NEW="true"
+          fi
+
+          # 输出给后续步骤使用
+          echo "ks_pass=$KS_PASS" >> $GITHUB_OUTPUT
+          echo "ks_alias=$KS_ALIAS" >> $GITHUB_OUTPUT
+          echo "is_new=$IS_NEW" >> $GITHUB_OUTPUT
+
+          # 如果是新生成的，创建信息文件
+          if [ "$IS_NEW" = "true" ]; then
+            KS_BASE64=$(base64 -w 0 "$KS_FILE")
+
+            cat > /tmp/keystore-info.txt << INFOEOF
+╔══════════════════════════��═══════════════════════════════════╗
+║              🔑 KEYSTORE 信息 — 请妥善保存！                ║
+╠══════════════════════════════════════════════════════════════╣
+║                                                            ║
+║  App Name:     ${{ inputs.app_name }}
+║  Package ID:   ${{ inputs.app_id }}
+║  Key Alias:    $KS_ALIAS
+║  Password:     $KS_PASS
+║  Generated:    $(date -u '+%Y-%m-%d %H:%M UTC')
+║  Validity:     10000 days (~27 years)
+║                                                            ║
+╠══════════════════════════════════════════════════════════════╣
+║                                                            ║
+║  ⚠️  重要：丢失 Keystore = 永远无法更新此 App               ║
+║                                                            ║
+║  后续打包要保持同一签名，请在本仓库添加 2 个 Secret：        ║
+║                                                            ║
+║  Settings → Secrets and variables → Actions → New secret    ║
+║                                                            ║
+║  Secret 1:                                                  ║
+║    Name:  KEYSTORE_BASE64                                   ║
+║    Value: （见下方 base64 编码）                             ║
+║                                                            ║
+║  Secret 2:                                                  ║
+║    Name:  KEYSTORE_PASS                                     ║
+║    Value: $KS_PASS
+║                                                            ║
+╚══════════════════════════════════════════════════════════════╝
+
+═══ KEYSTORE_BASE64 的值（复制下面这整行）═══
+
+$KS_BASE64
+
+═══ 结束 ═══
+INFOEOF
+
+            echo "✅ New keystore generated. Info saved to artifact."
+          fi
+
+      # ════════════════════════════════════════════════
+      # 第 8 步：配置 Gradle 签名
+      # ════════════════════════════════════════════════
+      - name: "📝 Configure Gradle signing"
+        working-directory: pwa-source
+        run: |
+          KS_PASS="${{ steps.keystore.outputs.ks_pass }}"
+          KS_ALIAS="${{ steps.keystore.outputs.ks_alias }}"
+
+          # 创建签名配置文件（heredoc 内容顶格，避免多余缩进）
+          cat > android/app/signing.gradle << GRADLE
+android {
+    signingConfigs {
+        release {
+            storeFile file("release.keystore")
+            storePassword "$KS_PASS"
+            keyAlias "$KS_ALIAS"
+            keyPassword "$KS_PASS"
+        }
+    }
+    buildTypes {
+        release {
+            signingConfig signingConfigs.release
+        }
+    }
+}
+GRADLE
+
+          # 引用签名配置
+          echo 'apply from: "signing.gradle"' >> android/app/build.gradle
+
+          echo "✅ Gradle signing configured"
+
+      # ═══════════════════════════════════════════════
+      # 第 9 步：设置版本号
+      # ════════════════════════════════════════════════
+      - name: "🏷️ Set version number"
+        working-directory: pwa-source
+        run: |
+          VERSION="${{ inputs.app_version }}"
+          MAJOR=$(echo "$VERSION" | cut -d. -f1)
+          MINOR=$(echo "$VERSION" | cut -d. -f2)
+          PATCH=$(echo "$VERSION" | cut -d. -f3)
+          VERSION_CODE=$((MAJOR * 10000 + MINOR * 100 + PATCH))
+
+          BUILD_GRADLE="android/app/build.gradle"
+          sed -i "s/versionCode [0-9]*/versionCode $VERSION_CODE/" "$BUILD_GRADLE"
+          sed -i "s/versionName \".*\"/versionName \"$VERSION\"/" "$BUILD_GRADLE"
+
+          echo "✅ Version set to $VERSION (code: $VERSION_CODE)"
+
+      # ════════════════════════════════════════════════
+      # 第 10 步：构建 APK + AAB
+      # ════════════════════════════════════════════════
+      - name: "🏗️ Build APK + AAB"
+        working-directory: pwa-source/android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease bundleRelease
+
+          echo "✅ Build complete"
+
+      # ════════════════════════════════════════════════
+      # 第 11 步：整理输出文件
+      # ════════════════════════════════════════════════
+      - name: "📦 Organize output files"
+        run: |
+          mkdir -p output
+          APP_NAME="${{ inputs.app_name }}"
+          VERSION="${{ inputs.app_version }}"
+
+          # APK
+          cp pwa-source/android/app/build/outputs/apk/release/*.apk \
+            "output/${APP_NAME}-v${VERSION}.apk"
+
+          # AAB (for Google Play / Huawei AppGallery)
+          cp pwa-source/android/app/build/outputs/bundle/release/*.aab \
+            "output/${APP_NAME}-v${VERSION}.aab"
+
+          # Keystore（仅首次生成时包含）
+          IS_NEW="${{ steps.keystore.outputs.is_new }}"
+          if [ "$IS_NEW" = "true" ]; then
+            cp pwa-source/android/app/release.keystore "output/release.keystore"
+            cp /tmp/keystore-info.txt "output/keystore-info.txt"
+          fi
+
+          # 输出文件列表
+          echo ""
+          echo "📦 Output files:"
+          ls -lh output/
+
+      # ════════════════════════════════════════════════
+      # 第 12 步：上传产物
+      # ════════════════════════════════════════════════
+      - name: "☁️ Upload artifacts"
+        uses: actions/upload-artifact@v4
+        with:
+          name: "${{ inputs.app_name }}-v${{ inputs.app_version }}"
+          path: output/
+          retention-days: 90
+
+      # ════════════════════════════════════════════════
+      # 第 13 步：构建摘要
+      # ════════════════════════════════════════════════
+      - name: "📊 Build summary"
+        run: |
+          APP_NAME="${{ inputs.app_name }}"
+          VERSION="${{ inputs.app_version }}"
+          APK_SIZE=$(du -h "output/${APP_NAME}-v${VERSION}.apk" | cut -f1)
+          AAB_SIZE=$(du -h "output/${APP_NAME}-v${VERSION}.aab" | cut -f1)
+          IS_NEW="${{ steps.keystore.outputs.is_new }}"
+
+          cat >> $GITHUB_STEP_SUMMARY << SUMMARYEOF
+          ## 📱 构建完成！
+
+          | 项目 | 值 |
+          |------|-----|
+          | App 名称 | **${APP_NAME}** |
+          | 包名 | \`${{ inputs.app_id }}\` |
+          | PWA 源码 | ${{ inputs.pwa_repo }} |
+          | 版本 | ${VERSION} |
+          | 打包模式 | 🏠 本地模式（Web 代码已打包进 APK） |
+          | APK 大小 | ${APK_SIZE} |
+          | AAB 大小 | ${AAB_SIZE} |
+          | Keystore | $([ "$IS_NEW" = "true" ] && echo "🆕 新生成（请保存！）" || echo "♻️ 使用已有") |
+
+          ### 📦 下载
+          点击上方 **Artifacts** 下载 ZIP，包含：
+          - \`.apk\` — 直接安装到安卓手机
+          - \`.aab\` — 上传到 Google Play / 华为应用市场
+          $([ "$IS_NEW" = "true" ] && echo "- \`release.keystore\` + \`keystore-info.txt\` — **⚠️ 必须保存！丢了就再也无法更新此 App**")
+
+          ### 🏗️ 架构说明
+          - **UI 代码**已打包在 APK 里，离线也能显示界面
+          - **数据**通过 Supabase API 在线获取，实时更新
+          - **配置**通过 Supabase 远程覆盖，改品牌/颜色不需要重新打包
+          - 需要更新 UI 代码时，改 PWA 源码后重新跑此 Action 即可
+
+          $([ "$IS_NEW" = "true" ] && cat << 'KEYSTORETIP'
+          ### 🔑 保存 Keystore（重要！）
+          这是首次构建，Keystore 是新生成的。为了后续打包使用同一签名：
+          1. 下载 Artifact 里的 \`keystore-info.txt\`
+          2. 按照文件里的说明，在本仓库添加 2 个 Secret：
+             - \`KEYSTORE_BASE64\`
+             - \`KEYSTORE_PASS\`
+          3. 以后再打包就会自动使用同一个 Keystore
+          KEYSTORETIP
+          )
+          SUMMARYEOF

@@ -300,37 +300,37 @@ jobs:
           npx cap init "${{ inputs.app_name }}" "${{ inputs.app_id }}" --web-dir dist
 
           # 覆盖配置文件（本地模式：Web 代码打包进 APK）
-          # 注意：heredoc 内容不能有前导缩进，否则会写入文件
+          # YAML run:| 会自动去除前导缩进，所以 heredoc 内容保持对齐即可
           cat > capacitor.config.ts << 'CAPEOF'
-import type { CapacitorConfig } from '@capacitor/cli';
+          import type { CapacitorConfig } from '@capacitor/cli';
 
-const config: CapacitorConfig = {
-  appId: '${{ inputs.app_id }}',
-  appName: '${{ inputs.app_name }}',
-  webDir: 'dist',
-  plugins: {
-    SplashScreen: {
-      launchAutoHide: true,
-      launchShowDuration: 2000,
-      backgroundColor: '#ffffff',
-      showSpinner: false,
-    },
-    PushNotifications: {
-      presentationOptions: ['badge', 'sound', 'alert'],
-    },
-    Keyboard: {
-      resize: 'body',
-      resizeOnFullScreen: true,
-    },
-    LocalNotifications: {
-      smallIcon: 'ic_launcher',
-      iconColor: '#4CAF50',
-    },
-  },
-};
+          const config: CapacitorConfig = {
+            appId: '${{ inputs.app_id }}',
+            appName: '${{ inputs.app_name }}',
+            webDir: 'dist',
+            plugins: {
+              SplashScreen: {
+                launchAutoHide: true,
+                launchShowDuration: 2000,
+                backgroundColor: '#ffffff',
+                showSpinner: false,
+              },
+              PushNotifications: {
+                presentationOptions: ['badge', 'sound', 'alert'],
+              },
+              Keyboard: {
+                resize: 'body',
+                resizeOnFullScreen: true,
+              },
+              LocalNotifications: {
+                smallIcon: 'ic_launcher',
+                iconColor: '#4CAF50',
+              },
+            },
+          };
 
-export default config;
-CAPEOF
+          export default config;
+          CAPEOF
 
           # 添加安卓平台
           npx cap add android
@@ -629,41 +629,41 @@ CAPEOF
             KS_BASE64=$(base64 -w 0 "$KS_FILE")
 
             cat > /tmp/keystore-info.txt << INFOEOF
-╔══════════════════════════��═══════════════════════════════════╗
-║              🔑 KEYSTORE 信息 — 请妥善保存！                ║
-╠══════════════════════════════════════════════════════════════╣
-║                                                            ║
-║  App Name:     ${{ inputs.app_name }}
-║  Package ID:   ${{ inputs.app_id }}
-║  Key Alias:    $KS_ALIAS
-║  Password:     $KS_PASS
-║  Generated:    $(date -u '+%Y-%m-%d %H:%M UTC')
-║  Validity:     10000 days (~27 years)
-║                                                            ║
-╠══════════════════════════════════════════════════════════════╣
-║                                                            ║
-║  ⚠️  重要：丢失 Keystore = 永远无法更新此 App               ║
-║                                                            ║
-║  后续打包要保持同一签名，请在本仓库添加 2 个 Secret：        ║
-║                                                            ║
-║  Settings → Secrets and variables → Actions → New secret    ║
-║                                                            ║
-║  Secret 1:                                                  ║
-║    Name:  KEYSTORE_BASE64                                   ║
-║    Value: （见下方 base64 编码）                             ║
-║                                                            ║
-║  Secret 2:                                                  ║
-║    Name:  KEYSTORE_PASS                                     ║
-║    Value: $KS_PASS
-║                                                            ║
-╚══════════════════════════════════════════════════════════════╝
+            ╔══════════════════════════════════════════════════════════════╗
+            ║              🔑 KEYSTORE 信息 — 请妥善保存！                ║
+            ╠══════════════════════════════════════════════════════════════╣
+            ║                                                            ║
+            ║  App Name:     ${{ inputs.app_name }}
+            ║  Package ID:   ${{ inputs.app_id }}
+            ║  Key Alias:    $KS_ALIAS
+            ║  Password:     $KS_PASS
+            ║  Generated:    $(date -u '+%Y-%m-%d %H:%M UTC')
+            ║  Validity:     10000 days (~27 years)
+            ║                                                            ║
+            ╠══════════════════════════════════════════════════════════════╣
+            ║                                                            ║
+            ║  ⚠️  重要：丢失 Keystore = 永远无法更新此 App               ║
+            ║                                                            ║
+            ║  后续打包要保持同一签名，请在本仓库添加 2 个 Secret：        ║
+            ║                                                            ║
+            ║  Settings → Secrets and variables → Actions → New secret    ║
+            ║                                                            ║
+            ║  Secret 1:                                                  ║
+            ║    Name:  KEYSTORE_BASE64                                   ║
+            ║    Value: （见下方 base64 编码）                             ║
+            ║                                                            ║
+            ║  Secret 2:                                                  ║
+            ║    Name:  KEYSTORE_PASS                                     ║
+            ║    Value: $KS_PASS
+            ║                                                            ║
+            ╚══════════════════════════════════════════════════════════════╝
 
-═══ KEYSTORE_BASE64 的值（复制下面这整行）═══
+            ═══ KEYSTORE_BASE64 的值（复制下面这整行）═══
 
-$KS_BASE64
+            $KS_BASE64
 
-═══ 结束 ═══
-INFOEOF
+            ═══ 结束 ═══
+            INFOEOF
 
             echo "✅ New keystore generated. Info saved to artifact."
           fi
@@ -677,24 +677,24 @@ INFOEOF
           KS_PASS="${{ steps.keystore.outputs.ks_pass }}"
           KS_ALIAS="${{ steps.keystore.outputs.ks_alias }}"
 
-          # 创建签名配置文件（heredoc 内容顶格，避免多余缩进）
+          # 创建签名配置文件（heredoc 内容保持缩进，YAML 自动去除）
           cat > android/app/signing.gradle << GRADLE
-android {
-    signingConfigs {
-        release {
-            storeFile file("release.keystore")
-            storePassword "$KS_PASS"
-            keyAlias "$KS_ALIAS"
-            keyPassword "$KS_PASS"
-        }
-    }
-    buildTypes {
-        release {
-            signingConfig signingConfigs.release
-        }
-    }
-}
-GRADLE
+          android {
+              signingConfigs {
+                  release {
+                      storeFile file("release.keystore")
+                      storePassword "$KS_PASS"
+                      keyAlias "$KS_ALIAS"
+                      keyPassword "$KS_PASS"
+                  }
+              }
+              buildTypes {
+                  release {
+                      signingConfig signingConfigs.release
+                  }
+              }
+          }
+          GRADLE
 
           # 引用签名配置
           echo 'apply from: "signing.gradle"' >> android/app/build.gradle

@@ -505,7 +505,7 @@ jobs:
 
           echo "✅ Icon processing complete"
 
-      # ════════════════════════════════════════════════
+      # ═══════════════════���════════════════════════════
       # 第 6 步：注入安卓权限
       # ════════════════════════════════════════════════
       - name: "🔐 Configure Android permissions"
@@ -663,7 +663,7 @@ jobs:
             $KS_BASE64
 
             ═══ 结束 ═══
-            INFOEOF
+          INFOEOF
 
             echo "✅ New keystore generated. Info saved to artifact."
           fi

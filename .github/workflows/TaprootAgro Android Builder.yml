@@ -624,7 +624,7 @@ jobs:
           echo "ks_alias=$KS_ALIAS" >> $GITHUB_OUTPUT
           echo "is_new=$IS_NEW" >> $GITHUB_OUTPUT
 
-          # 如果是新生成的，创建信息文件
+          # ���果是新生成的，创建信息文件
           if [ "$IS_NEW" = "true" ]; then
             KS_BASE64=$(base64 -w 0 "$KS_FILE")
 
@@ -780,40 +780,47 @@ jobs:
           AAB_SIZE=$(du -h "output/${APP_NAME}-v${VERSION}.aab" | cut -f1)
           IS_NEW="${{ steps.keystore.outputs.is_new }}"
 
-          cat >> $GITHUB_STEP_SUMMARY << SUMMARYEOF
-          ## 📱 构建完成！
-
-          | 项目 | 值 |
-          |------|-----|
-          | App 名称 | **${APP_NAME}** |
-          | 包名 | \`${{ inputs.app_id }}\` |
-          | PWA 源码 | ${{ inputs.pwa_repo }} |
-          | 版本 | ${VERSION} |
-          | 打包模式 | 🏠 本地模式（Web 代码已打包进 APK） |
-          | APK 大小 | ${APK_SIZE} |
-          | AAB 大小 | ${AAB_SIZE} |
-          | Keystore | $([ "$IS_NEW" = "true" ] && echo "🆕 新生成（请保存！）" || echo "♻️ 使用已有") |
-
-          ### 📦 下载
-          点击上方 **Artifacts** 下载 ZIP，包含：
-          - \`.apk\` — 直接安装到安卓手机
-          - \`.aab\` — 上传到 Google Play / 华为应用市场
-          $([ "$IS_NEW" = "true" ] && echo "- \`release.keystore\` + \`keystore-info.txt\` — **⚠️ 必须保存！丢了就再也无法更新此 App**")
-
-          ### 🏗️ 架构说明
-          - **UI 代码**已打包在 APK 里，离线也能显示界面
-          - **数据**通过 Supabase API 在线获取，实时更新
-          - **配置**通过 Supabase 远程覆盖，改品牌/颜色不需要重新打包
-          - 需要更新 UI 代码时，改 PWA 源码后重新跑此 Action 即可
-
-          $([ "$IS_NEW" = "true" ] && cat << 'KEYSTORETIP'
-          ### 🔑 保存 Keystore（重要！）
-          这是首次构建，Keystore 是新生成的。为了后续打包使用同一签名：
-          1. 下载 Artifact 里的 \`keystore-info.txt\`
-          2. 按照文件里的说明，在本仓库添加 2 个 Secret：
-             - \`KEYSTORE_BASE64\`
-             - \`KEYSTORE_PASS\`
-          3. 以后再打包就会自动使用同一个 Keystore
-          KEYSTORETIP
-          )
-          SUMMARYEOF
+          {
+            echo "## 📱 构建完成 / Build Complete!"
+            echo ""
+            echo "| 项目 Item | 值 Value |"
+            echo "|-----------|---------|"
+            echo "| 应用名称 App Name | **${APP_NAME}** |"
+            echo "| 包名 Package ID | \`${{ inputs.app_id }}\` |"
+            echo "| PWA 源码 Source | ${{ inputs.pwa_repo }} |"
+            echo "| 版本 Version | ${VERSION} |"
+            echo "| 打包模式 Build Mode | 🏠 本地模式 Local (Web 代码打包进 APK / web assets bundled in APK) |"
+            echo "| APK 大小 Size | ${APK_SIZE} |"
+            echo "| AAB 大小 Size | ${AAB_SIZE} |"
+            if [ "$IS_NEW" = "true" ]; then
+              echo "| 签名密钥 Keystore | 🆕 新生成（请保存！）/ Newly generated — **save it!** |"
+            else
+              echo "| 签名密钥 Keystore | ♻️ 使用已有 Secret / Using existing from Secrets |"
+            fi
+            echo ""
+            echo "### 📦 下载 / Download"
+            echo "点击上方 **Artifacts** 下载 ZIP，包含："
+            echo "Click **Artifacts** above to download the ZIP, which contains:"
+            echo "- \`.apk\` — 直接安装到安卓手机 / Install directly on Android devices"
+            echo "- \`.aab\` — 上传到 Google Play / 华为应用市场 / Upload to Google Play / Huawei AppGallery"
+            if [ "$IS_NEW" = "true" ]; then
+              echo "- \`release.keystore\` + \`keystore-info.txt\` — **⚠️ 必须保存！丢了就再也无法更新此 App / You MUST save these! Lost keystore = can never update this app**"
+            fi
+            echo ""
+            echo "### 🏗️ 架构说明 / Architecture"
+            echo "- **UI 代码**已打包在 APK 里，离线也能显示界面 / **UI code** is bundled inside the APK — works offline"
+            echo "- **数据**通过 Supabase API 在线获取，实时更新 / **Data** is fetched via Supabase API in real-time"
+            echo "- **配置**通过 Supabase 远程覆盖，改品牌/颜色不需要重新打包 / **Config** can be overridden remotely — no rebuild needed"
+            echo "- 需要更新 UI 代码时，改 PWA 源码后重新跑此 Action / To update UI, modify PWA source and re-run this Action"
+            if [ "$IS_NEW" = "true" ]; then
+              echo ""
+              echo "### 🔑 保存签名密钥（重要！）/ Save Your Keystore (Important!)"
+              echo "这是首次构建，Keystore 是新生成的。为了后续打包使用同一签名："
+              echo "This is the first build — a new keystore was generated. To keep the same signing key:"
+              echo "1. 下载 Artifact 里的 \`keystore-info.txt\` / Download \`keystore-info.txt\` from the Artifact"
+              echo "2. 按照文件说明，在本仓库添加 2 个 Secret / Add 2 Secrets to this repo:"
+              echo "   - \`KEYSTORE_BASE64\`"
+              echo "   - \`KEYSTORE_PASS\`"
+              echo "3. 以后再打包就会自动使用同一个 Keystore / Future builds will automatically use the same keystore"
+            fi
+          } >> $GITHUB_STEP_SUMMARY

@@ -4,7 +4,7 @@
 #
 # 使用方法：
 #   app_name  → App 显示名称（如 "taprootagro"）
-#   app_id    → 安卓包名（如 com.harvest.helper）
+#   app_id    → 安卓包名（如 com.taprootagrofarmer.app）
 #   pwa_repo  → 你的 PWA 源码仓库地址（如 https://github.com/yourname/your-pwa）
 #
 # 此工作流会：
@@ -21,7 +21,7 @@
 #
 # Usage:
 #   app_name  → App Display Name (e.g., "taprootagro")
-#   app_id    → Android Package Name (e.g., com.harvest.helper)
+#   app_id    → Android Package Name (e.g., com.taprootagrofarmer.app)
 #   pwa_repo  → Your PWA Source Code Repository URL (e.g., https://github.com/yourname/your-pwa)
 #
 # This workflow will:
